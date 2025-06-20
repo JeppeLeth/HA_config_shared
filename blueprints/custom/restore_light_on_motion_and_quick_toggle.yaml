@@ -24,7 +24,10 @@ blueprint:
       description: >
         Time window in seconds during which both the light-off and motion-on
         must have occurred to trigger a restore.
-      default: 1
+
+        Be aware that the motion sensor might have triggered the lights earlier than it looks depending on the switch/relay.
+        Therefore sometimes you need to add 1 second to what you might experience. This is overall what causes the confusion/quick toggle to happen.
+      default: 2
       selector:
         number:
           min: 0
