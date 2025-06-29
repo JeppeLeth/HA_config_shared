@@ -1,0 +1,67 @@
+blueprint:
+  name: Restore Light if Motion + Quick Toggle
+  description: >
+    When a person entered a room with motion activated light, and clicks the switch at the same time, resulting in the lights turning off.
+    This resolves the issue by turning the lights on if the switch was toggled within XX seconds of the motion light activation.
+  domain: automation
+  icon: mdi:toggle-switch-variant
+  input:
+    light_entity:
+      name: Light switch
+      description: The light switch you want to monitor/restore
+      selector:
+        entity:
+          domain: light
+
+    motion_sensor:
+      name: Motion Sensor
+      description: The motion sensor to check
+      selector:
+        entity:
+          domain: binary_sensor
+
+    grace_period:
+      name: Grace period (seconds)
+      description: >
+        Time window in seconds during which both the light-off and motion-on
+        must have occurred to trigger a restore.
+
+        Be aware that the motion sensor might have triggered the lights earlier than it looks depending on the switch/relay.
+        Therefore sometimes you need to add 1 second to what you might experience. This is overall what causes the confusion/quick toggle to happen.
+      default: 2
+      selector:
+        number:
+          min: 0
+          max: 10
+          step: 0.1
+variables:
+    light_entity: !input "light_entity"
+    motion_sensor: !input "motion_sensor"
+    grace_period: !input "grace_period"
+
+trigger:
+  - platform: state
+    entity_id: !input light_entity
+    from: "on"
+    to: "off"
+
+condition:
+  # 1) Motion currently on
+  - condition: state
+    entity_id: !input motion_sensor
+    state: "on"
+
+  # 2) Both events happened within the last `grace_period` seconds
+  - condition: template
+    value_template: >
+      {% set light = states[trigger.entity_id] %}
+      {% set motion = states[motion_sensor] %}
+      {% set now = now() %}
+      {% set gp = grace_period | float %}
+      {{ (now - light.last_changed).total_seconds() <= gp 
+         and (now - motion.last_changed).total_seconds() <= gp }}
+
+action:
+  - service: light.turn_on
+    target:
+      entity_id: !input light_entity
