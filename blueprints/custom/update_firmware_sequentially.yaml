@@ -1,67 +1,192 @@
 blueprint:
-  name: Restore Light if Motion + Quick Toggle
-  description: >
-    When a person entered a room with motion activated light, and clicks the switch at the same time, resulting in the lights turning off.
-    This resolves the issue by turning the lights on if the switch was toggled within XX seconds of the motion light activation.
+  name: Scheduled Device Firmware Update
+  description: |
+    Loop through available device firmware updates for a list of devices on specified days of the week and at a specified time, installing updates one by one and stopping if maximum run hours are exceeded. Optionally send notifications on success and errors.
   domain: automation
-  icon: mdi:toggle-switch-variant
   input:
-    light_entity:
-      name: Light switch
-      description: The light switch you want to monitor/restore
+    trigger_time:
+      name: Trigger Time
+      description: Time of day to start the firmware update check
+      default: "03:00:00"
       selector:
-        entity:
-          domain: light
-
-    motion_sensor:
-      name: Motion Sensor
-      description: The motion sensor to check
+        time: {}
+    days_of_week:
+      name: Days of Week
+      description: Days of the week to run the automation
+      default:
+        - mon
+        - tue
+        - wed
+        - thu
+        - fri
+        - sat
+        - sun
       selector:
-        entity:
-          domain: binary_sensor
-
-    grace_period:
-      name: Grace period (seconds)
-      description: >
-        Time window in seconds during which both the light-off and motion-on
-        must have occurred to trigger a restore.
-
-        Be aware that the motion sensor might have triggered the lights earlier than it looks depending on the switch/relay.
-        Therefore sometimes you need to add 1 second to what you might experience. This is overall what causes the confusion/quick toggle to happen.
-      default: 2
+        select:
+          multiple: true
+          options:
+            - label: Monday
+              value: mon
+            - label: Tuesday
+              value: tue
+            - label: Wednesday
+              value: wed
+            - label: Thursday
+              value: thu
+            - label: Friday
+              value: fri
+            - label: Saturday
+              value: sat
+            - label: Sunday
+              value: sun
+    max_wait_per_update:
+      name: Maximum wait minutes per update
+      description: Maximum number of minutes for a single update to run
+      default: 40
       selector:
         number:
-          min: 0
-          max: 10
-          step: 0.1
-variables:
-    light_entity: !input "light_entity"
-    motion_sensor: !input "motion_sensor"
-    grace_period: !input "grace_period"
+          min: 5
+          max: 120
+          unit_of_measurement: minutes
+          step: 5
+    max_run_hours:
+      name: Maximum Run Hours
+      description: Maximum number of hours the update loop may run
+      default: 3
+      selector:
+        number:
+          min: 0.5
+          max: 24
+          unit_of_measurement: hours
+          step: 0.5
+    notify_success:
+      name: Notify on Success
+      description: Send a notification when updates succeed
+      default: true
+      selector:
+        boolean: {}
+    notify_error:
+      name: Notify on Error
+      description: Send a notification if an update times out or fails
+      default: true
+      selector:
+        boolean: {}
+    update_entities:
+      name: Update Entities
+      description: Pick the update entities you want to run
+      selector:
+        entity:
+          domain: update
+          multiple: true
 
 trigger:
-  - platform: state
-    entity_id: !input light_entity
-    from: "on"
-    to: "off"
-
+  - platform: time
+    at: !input trigger_time
 condition:
-  # 1) Motion currently on
-  - condition: state
-    entity_id: !input motion_sensor
-    state: "on"
+  - condition: time
+    weekday: !input days_of_week
 
-  # 2) Both events happened within the last `grace_period` seconds
-  - condition: template
-    value_template: >
-      {% set light = states[trigger.entity_id] %}
-      {% set motion = states[motion_sensor] %}
-      {% set now = now() %}
-      {% set gp = grace_period | float %}
-      {{ (now - light.last_changed).total_seconds() <= gp 
-         and (now - motion.last_changed).total_seconds() <= gp }}
+variables:
+  start_time: "{{ now() }}"
+  picked_update_entities: !input update_entities
+  update_entities: >
+    {{ picked_update_entities
+       | select('is_state', 'on')
+       | sort(attribute='in_progress')
+       | reverse
+       | list }}
+
+mode: single
 
 action:
-  - service: light.turn_on
-    target:
-      entity_id: !input light_entity
+  - choose:
+      - alias: Check if there are any updateable devices
+        conditions:
+          - condition: template
+            value_template: "{{ update_entities | length > 0 }}"
+        sequence:
+          - repeat:
+              for_each: >
+                {{ update_entities }}
+              sequence:
+                - service: system_log.write
+                  data:
+                    level: info
+                    message: >-
+                      Debug OTA – would update {{ repeat.item }})
+                - choose:
+                    - alias: Stop if runtime exceeds maximum hours
+                      conditions:
+                        - condition: template
+                          value_template: >-
+                            {{ (now() - start_time).total_seconds() > (input.max_run_hours * 3600) }}
+                      sequence:
+                        - stop: Maximum runtime reached—ending loop
+                - choose:
+                    - alias: Only install if not already in progress
+                      conditions:
+                        - condition: template
+                          value_template: >-
+                            {{ state_attr(repeat.item, 'in_progress') not in [true] }}
+                      sequence:
+                        - service: update.install
+                          target:
+                            entity_id: "{{ repeat.item }}"
+                          continue_on_error: true
+                  alias: only install if not already in progress
+                - data:
+                    message: >-
+                      Debug state of item "{{ repeat.item }}" is "{{
+                      states(repeat.item) }}"
+                    level: info
+                  action: system_log.write
+                - wait_template: "{{ is_state(repeat.item, 'off') }}"
+                  timeout: "00:40:00"
+                  continue_on_timeout: true
+                  alias: Wait for '{{ repeat.item }}' to report 'off'
+                - choose:
+                    - conditions:
+                        - condition: template
+                          value_template: |
+                            {{ is_state(repeat.item, 'on') }}
+                          alias: >-
+                            Stop if device still needs update (might be running the update and we dont want more updates running at once
+                      sequence:
+                        - data:
+                            title: OTA Update Failed
+                            message: >-
+                              Automation "{{ this.attributes.friendly_name }}" timed out on {{ repeat.item }}. Stopping further updates.
+                          action: persistent_notification.create
+                          enabled: !input notify_error
+                        - stop: Timeout reached on {{ repeat.item }}
+                - delay: "00:00:15"
+                  alias: Give the network a short breather
+          - choose:
+              - alias: Success summary notification
+                conditions:
+                  - condition: template
+                    value_template: >-
+                      {{ update_entities | select('is_state','off') | list |
+                      length > 0 }}
+                sequence:
+                  - data:
+                      title: "{{ this.attributes.friendly_name }} – Update Summary"
+                      message: |
+                        {% set successful = update_entities
+                           | select('is_state','off')
+                           | list %}
+                        {% if successful | length > 0 %}
+                          Successfully updated:
+                          {% for item in successful %}
+                            - {{ item }}
+                          {% endfor %}
+                        {% endif %}
+                    action: persistent_notification.create
+                    enabled: !input notify_success
+    default:
+      - alias: Log run with no updates available
+        service: system_log.write
+        data:
+          level: info
+          message: >-
+            Debug OTA – no updates available for any devices in the configured device list

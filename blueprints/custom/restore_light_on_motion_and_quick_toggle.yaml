@@ -4,7 +4,6 @@ blueprint:
     When a person entered a room with motion activated light, and clicks the switch at the same time, resulting in the lights turning off.
     This resolves the issue by turning the lights on if the switch was toggled within XX seconds of the motion light activation.
   domain: automation
-  icon: mdi:toggle-switch-variant
   input:
     light_entity:
       name: Light switch
